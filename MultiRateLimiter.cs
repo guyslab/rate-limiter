@@ -26,30 +26,41 @@ public sealed class MultiRateLimiter<TArg, TResult>: IMultiRateLimiter<TArg, TRe
 
     public async Task<TResult> Perform(TArg argument)
     {
-        DateTime now;
-        DateTime earliestAllowedTime;
-
-        // Check each tracker and figure out the earliest time we are allowed to proceed
-        lock (_syncLock)
-        {
-            now = DateTime.UtcNow;
-            earliestAllowedTime = _trackers
-                .Select(t => t.GetNextAvailableTime(now))
-                .Max(); // must satisfy the latest requirement among all limits
-        }
-
-        // If must wait - delay
-        if (earliestAllowedTime > now)
-            await Task.Delay(earliestAllowedTime - now);
-
-        // Consider a new time for the operation, whether we waited or not
-        lock (_syncLock)
-        {
-            var currentTime = DateTime.UtcNow;
-            foreach (var tracker in _trackers)
-                tracker.RecordCall(currentTime);
-        }
-
+        DateTime callTime;
+        
+        await Task.Delay(GetDelayTimeAndRecordCall(out callTime));
+        
         return await _operation(argument);
+    }
+
+    private TimeSpan GetDelayTimeAndRecordCall(out DateTime callTime)
+    {
+        lock (_syncLock)
+        {
+            var now = DateTime.UtcNow;
+            
+            // Get the earliest time we're allowed to proceed based on all trackers
+            var earliestAllowedTime = _trackers
+                .Select(t => t.GetNextAvailableTime(now))
+                .Max();
+            
+            TimeSpan delay = TimeSpan.Zero;
+            if (earliestAllowedTime > now)
+            {
+                delay = earliestAllowedTime - now;
+                // record the call at the future time when it will actually execute
+                callTime = earliestAllowedTime;
+            }
+            else
+            {
+                // proceed immediately
+                callTime = now;
+            }
+            
+            foreach (var tracker in _trackers)
+                tracker.RecordCall(callTime);
+                
+            return delay;
+        }
     }
 }
